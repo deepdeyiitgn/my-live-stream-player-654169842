@@ -1,0 +1,5 @@
+python -m http.server 8000
+
+http://localhost:8000/player.html
+
+Get-ChildItem -Path . -File -Recurse | Where-Object { $_.Extension -match 'mp3|m4a|ogg|wav|flac|aac' } | Select-Object -ExpandProperty Name | ConvertTo-Json -Compress | Out-File -Encoding utf8 .\tracks.json

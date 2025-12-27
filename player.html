@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Deep – 60 Days BGM Player (Reactive Lite)</title>
+
+<!-- ID3 tag reader -->
+<script src="https://cdn.jsdelivr.net/npm/jsmediatags@3.9.5/dist/jsmediatags.min.js"></script>
+
+<style>
+  :root{
+    --text:#fff;
+    --muted:rgba(255,255,255,0.72);
+    --glass:rgba(0,0,0,0.42);
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    background:#050505;
+    color:var(--text);
+    font-family:Inter, Arial, sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  .wrap{
+    min-height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    flex-direction:column;
+    gap:22px;
+    padding:26px;
+    background:radial-gradient(circle at 30% 30%, #120b06 0%, #050505 70%);
+  }
+
+  /* Player card */
+  .player{
+    width:1100px; max-width:calc(100% - 56px);
+    border-radius:16px; overflow:hidden; position:relative;
+    box-shadow:0 14px 40px rgba(0,0,0,0.6);
+    background:rgba(255,255,255,0.02);
+    backdrop-filter: blur(12px);
+  }
+
+  /* reactive background layer (we update via JS) */
+  .bg{
+    position:absolute; inset:0; z-index:0;
+    filter: blur(28px) saturate(120%); transform:scale(1.08);
+    transition: background 420ms linear;
+  }
+  .overlay{
+    position:absolute; inset:0; z-index:1;
+    background: linear-gradient(90deg, rgba(8,8,8,0.45), rgba(6,6,6,0.78));
+  }
+
+  .content{
+    position:relative; z-index:2; padding:36px 48px 140px; display:flex; gap:34px; align-items:center;
+  }
+
+  .art{
+    flex:0 0 420px; width:420px; height:280px; border-radius:12px; overflow:hidden;
+    background:linear-gradient(180deg, rgba(255,255,255,0.03), rgba(0,0,0,0.12));
+    box-shadow:0 8px 30px rgba(0,0,0,0.45);
+  }
+  .art img{width:100%; height:100%; object-fit:cover; display:block}
+
+  .meta{flex:1 1 auto; min-width:0}
+  .titleWrap{height:64px; overflow:hidden; position:relative}
+  .marq{
+    font-size:44px; font-weight:700; line-height:1.05; white-space:nowrap;
+    position:absolute; left:0; top:0; will-change: transform;
+  }
+  .artist{margin-top:10px; font-size:18px; color:var(--muted)}
+
+  /* progress + timer overlay */
+  .progress-container{position:absolute; left:0; bottom:100px; width:100%; height:6px; background:rgba(255,255,255,0.06)}
+  .progress{height:100%; width:0%; background:linear-gradient(90deg,#ffb347,#ffcc33); transition:width 120ms linear}
+  .timer{position:absolute; bottom:72px; right:50px; font-size:15px; color:var(--muted)}
+
+  /* popups */
+  .popup{position:absolute; top:18px; padding:10px 16px; background:rgba(0,0,0,0.6); backdrop-filter:blur(6px); border-radius:10px; color:#fff; font-size:14px; opacity:0; transform:translateY(-6px); transition:all .35s ease; z-index:10}
+  .popup.show{opacity:1; transform:translateY(0)}
+  .popup.left{left:28px}
+  .popup.right{right:28px}
+
+  /* bottom controls OUTSIDE player - safe for OBS crop */
+  .controls-wrap{width:1100px; max-width:calc(100% - 56px); display:flex; justify-content:center}
+  .controls{display:flex; gap:12px; align-items:center; padding:12px 18px; border-radius:12px; background:var(--glass); border:1px solid rgba(255,255,255,0.06); backdrop-filter:blur(8px)}
+  .btn{background:none; border:0; color:var(--text); cursor:pointer; padding:10px 14px; border-radius:8px; font-size:15px}
+  .btn.big{font-weight:700; padding:12px 18px; background:rgba(255,255,255,0.03)}
+
+  @media (max-width:980px){
+    .art{display:none}
+    .marq{font-size:34px}
+    .player{max-width:calc(100% - 24px)}
+    .controls-wrap{max-width:calc(100% - 24px)}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="player" id="player">
+    <div class="bg" id="bg"></div>
+    <div class="overlay"></div>
+
+    <div class="content">
+      <div class="art"><img id="artimg" src="artwork.png" alt="art"></div>
+      <div class="meta">
+        <div class="titleWrap"><div class="marq" id="title">Loading…</div></div>
+        <div class="artist" id="artist"></div>
+      </div>
+    </div>
+
+    <div class="progress-container"><div class="progress" id="progress"></div></div>
+    <div class="timer" id="timer">00:00 / 00:00</div>
+
+    <div class="popup left" id="prevPopup"></div>
+    <div class="popup right" id="nextPopup"></div>
+  </div>
+</div>
+
+<div class="controls-wrap">
+  <div class="controls">
+    <button class="btn" id="prev">⏮ Prev</button>
+    <button class="btn big" id="play">▶ Play</button>
+    <button class="btn" id="next">Next ⏭</button>
+    <div style="width:8px"></div>
+    <button class="btn" id="shuffle">🔀 Shuffle</button>
+    <button class="btn" id="loop">🔁 Loop</button>
+  </div>
+</div>
+
+<script>
+/* 
+  Player (Reactive Lite):
+  - loads tracks.json in same folder
+  - reads embedded tags (title/artist/artwork) via jsmediatags
+  - progress, timer, prev/next popups
+  - amplitude-reactive gradient background using WebAudio (lightweight)
+  - keep buttons outside player for OBS cropping
+*/
+
+const titleEl = document.getElementById('title');
+const artistEl = document.getElementById('artist');
+const artImg = document.getElementById('artimg');
+const bgEl = document.getElementById('bg');
+const progressEl = document.getElementById('progress');
+const timerEl = document.getElementById('timer');
+const prevPopup = document.getElementById('prevPopup');
+const nextPopup = document.getElementById('nextPopup');
+
+const playBtn = document.getElementById('play');
+const prevBtn = document.getElementById('prev');
+const nextBtn = document.getElementById('next');
+const shuffleBtn = document.getElementById('shuffle');
+const loopBtn = document.getElementById('loop');
+
+let audio = new Audio();
+audio.crossOrigin = "anonymous";
+
+let tracks = []; // {url,title,artist,art}
+let idx = 0;
+let shuffled = true;
+let looping = false;
+
+// WebAudio: keep minimal
+let audioCtx = null, analyser = null, sourceNode = null;
+let dataArray = null;
+let smoothing = 0.85; // smoothing for visual lerp
+let visualLevel = 0; // smoothed level [0..1]
+
+/* ---------------- Manifest + tags ---------------- */
+async function loadTracks(){
+  try {
+    const resp = await fetch('tracks.json', {cache:'no-store'});
+    if(!resp.ok) throw new Error('tracks.json missing');
+    const list = await resp.json();
+    let fallback = null;
+    try{
+      const r = await fetch('artwork.png', {cache:'no-store'});
+      if(r.ok) fallback = URL.createObjectURL(await r.blob());
+    }catch(e){ fallback = null; }
+
+    tracks = [];
+    for(const name of list){
+      const url = encodeURI(name);
+      const tag = await readTags(url).catch(()=>({}));
+      tracks.push({
+        url,
+        title: tag.title || decodeURIComponent(name).replace(/\.[^/.]+$/,''),
+        artist: tag.artist || '',
+        art: tag.art || fallback
+      });
+    }
+
+    if(shuffled) shuffleArray(tracks);
+    loadTrack(0);
+  } catch(err){
+    titleEl.textContent = 'No tracks found — add tracks.json';
+    artistEl.textContent = '';
+  }
+}
+
+function readTags(url){
+  return new Promise((res)=>{
+    fetch(url).then(r=>r.blob()).then(blob=>{
+      blob.name = url;
+      window.jsmediatags.read(blob, {
+        onSuccess: function(result){
+          const t = result.tags;
+          let art = null;
+          if(t.picture){
+            let base64String = "";
+            for(let i=0;i<t.picture.data.length;i++) base64String += String.fromCharCode(t.picture.data[i]);
+            art = "data:" + t.picture.format + ";base64," + btoa(base64String);
+          }
+          res({title: t.title, artist: t.artist, art});
+        },
+        onError: function(){ res({}); }
+      });
+    }).catch(()=>res({}));
+  });
+}
+
+/* ---------------- Playback & UI ---------------- */
+function shuffleArray(a){
+  for(let i=a.length-1;i>0;i--){
+    const j = Math.floor(Math.random()*(i+1));
+    [a[i],a[j]] = [a[j],a[i]];
+  }
+}
+
+function loadTrack(i){
+  if(!tracks.length) return;
+  if(i < 0) i = tracks.length - 1;
+  if(i >= tracks.length) i = 0;
+
+  const prev = tracks[idx];
+  idx = i;
+  const t = tracks[idx];
+
+  // update now/next popup
+  showPopup('left', 'Previous — ' + (prev ? prev.title : 'None'));
+  const next = tracks[(idx + 1) % tracks.length];
+  showPopup('right', 'Next — ' + next.title);
+
+  audio.src = t.url;
+  setMeta(t);
+  // ensure audio context active when play
+  audio.play().then(()=>{ playBtn.textContent = '⏸ Pause'; startAnalyser(); }).catch(()=>{ playBtn.textContent = '▶ Play'; });
+}
+
+function setMeta(t){
+  titleEl.textContent = t.title || '';
+  artistEl.textContent = t.artist || '';
+  artistEl.style.display = t.artist ? 'block' : 'none';
+  artImg.src = t.art || 'artwork.png';
+  updateBackgroundFromImage(t.art || 'artwork.png');
+  startMarquee();
+}
+
+// popups
+function showPopup(side, text){
+  const el = side === 'left' ? prevPopup : nextPopup;
+  el.textContent = text;
+  el.classList.add('show');
+  setTimeout(()=> el.classList.remove('show'), 3200);
+}
+
+/* ---------------- Timer & Progress ---------------- */
+audio.ontimeupdate = () => {
+  const cur = audio.currentTime || 0;
+  const dur = audio.duration || 0;
+  const pct = dur ? (cur/dur*100) : 0;
+  progressEl.style.width = pct + '%';
+  timerEl.textContent = formatTime(cur) + ' / ' + (dur ? formatTime(dur) : '00:00');
+};
+audio.onended = () => { if(!looping) loadTrack(idx + 1); }
+
+/* ---------------- Controls ---------------- */
+playBtn.onclick = () => {
+  if(!audio.src) return;
+  if(audio.paused){ audio.play(); playBtn.textContent = '⏸ Pause'; startAnalyser(); }
+  else { audio.pause(); playBtn.textContent = '▶ Play'; stopAnalyserIfIdle(); }
+};
+prevBtn.onclick = ()=> loadTrack(idx - 1);
+nextBtn.onclick = ()=> loadTrack(idx + 1);
+shuffleBtn.onclick = ()=> { shuffled = !shuffled; shuffleBtn.style.opacity = shuffled ? 1 : 0.6; if(shuffled) shuffleArray(tracks); };
+loopBtn.onclick = ()=> { looping = !looping; audio.loop = looping; loopBtn.style.opacity = looping ? 1 : 0.6; };
+
+window.addEventListener('keydown', (e) => {
+  if(e.code === 'Space'){ e.preventDefault(); playBtn.click(); }
+  if(e.code === 'ArrowLeft') prevBtn.click();
+  if(e.code === 'ArrowRight') nextBtn.click();
+});
+
+/* ---------------- Marquee ---------------- */
+let marqueeTimer = null;
+function startMarquee(){
+  if(marqueeTimer) clearInterval(marqueeTimer);
+  const wrap = document.querySelector('.titleWrap');
+  const txt = document.querySelector('.marq');
+  setTimeout(()=>{
+    const wrapW = wrap.clientWidth, txtW = txt.scrollWidth;
+    if(txtW <= wrapW){ txt.style.transform = 'translateX(0)'; return; }
+    let pos = 0, dir = -1, speed = 0.6;
+    marqueeTimer = setInterval(()=>{
+      pos += dir * speed;
+      if(pos <= -(txtW - wrapW)) dir = 1;
+      if(pos >= 0) dir = -1;
+      txt.style.transform = `translateX(${pos}px)`;
+    }, 16);
+  }, 60);
+}
+
+/* ---------------- Background from image (dominant color) --------------- */
+function updateBackgroundFromImage(src){
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  img.src = src;
+  img.onload = ()=>{
+    const c = document.createElement('canvas'), ctx = c.getContext('2d');
+    c.width = 20; c.height = 20; ctx.drawImage(img, 0, 0, 20, 20);
+    const data = ctx.getImageData(0,0,20,20).data;
+    let r=0,g=0,b=0,count=0;
+    for(let i=0;i<data.length;i+=4){ r+=data[i]; g+=data[i+1]; b+=data[i+2]; count++; }
+    r = Math.round(r/count); g = Math.round(g/count); b = Math.round(b/count);
+    // base gradient
+    bgEl.style.background = `radial-gradient(circle at 25% 25%, rgba(${r},${g},${b},0.88), rgba(${Math.max(8,r-40)},${Math.max(8,g-40)},${Math.max(8,b-40)},0.88) 56%, rgba(6,6,8,0.95) 100%)`;
+  };
+  img.onerror = ()=> {
+    bgEl.style.background = 'linear-gradient(90deg, rgba(8,8,10,0.86), rgba(4,4,6,0.95))';
+  };
+}
+
+/* ---------------- WebAudio amplitude analyser (lite) ---------------- */
+function ensureAudioContext(){
+  if(audioCtx && audioCtx.state !== 'closed') return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  sourceNode = audioCtx.createMediaElementSource(audio);
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 1024; // small, lightweight
+  analyser.smoothingTimeConstant = 0.7;
+  sourceNode.connect(analyser);
+  analyser.connect(audioCtx.destination);
+  dataArray = new Uint8Array(analyser.fftSize);
+}
+
+let analyserRunning = false;
+function startAnalyser(){
+  try{
+    ensureAudioContext();
+    if(analyserRunning) return;
+    analyserRunning = true;
+    tickAnalyser();
+  }catch(e){
+    // AudioContext blocked (autoplay), ignore
+    analyserRunning = false;
+  }
+}
+function stopAnalyserIfIdle(){
+  // keep context open but stop visual updates if paused
+  analyserRunning = false;
+}
+
+function tickAnalyser(){
+  if(!analyser || !analyserRunning){ return; }
+  analyser.getByteTimeDomainData(dataArray);
+  // compute normalized RMS (0..1)
+  let sum = 0;
+  for(let i=0;i<dataArray.length;i++){
+    const v = (dataArray[i] - 128) / 128; // -1..1
+    sum += v * v;
+  }
+  const rms = Math.sqrt(sum / dataArray.length);
+  // smooth visual level
+  visualLevel = visualLevel * 0.85 + rms * 0.15;
+  applyReactiveGradient(visualLevel);
+  // next frame - low frequency to avoid excessive CPU
+  requestAnimationFrame(tickAnalyser);
+}
+
+/* Map amplitude to gradient intensity & speed */
+/* visualLevel ~ 0 .. 0.35 typical (quiet to loud). We'll map to [0..1] */
+let lastGradient = '';
+let lerpLevel = 0;
+function applyReactiveGradient(level){
+  // clamp
+  const norm = Math.min(1, level / 0.25);
+  // smooth
+  lerpLevel = lerpLevel * 0.85 + norm * 0.15;
+
+  // pick two hues based on image dominant (we'll read current bg and tweak brightness)
+  // derive a darker variant and a brighter variant
+  // We'll compute HSL by creating a temp canvas from bg image? Simpler: shift rgba by factor
+  // Instead we create gradient stop alpha changes & animation speed
+  const bright = Math.min(1, 0.35 + lerpLevel * 0.75); // brightness factor
+  const speedFactor = 0.6 + lerpLevel * 1.6; // affects subtle CSS transition time below
+
+  // Pull current background color by sampling small canvas from art image (we already set bg from art)
+  // For simplicity, create overlay gradient with varying opacity & radial size
+  const innerOpacity = 0.75 + lerpLevel * 0.18;
+  const midOpacity = 0.6 + lerpLevel * 0.25;
+  const darkOpacity = 0.9;
+
+  // Transition to new gradient string (keeps work light)
+const hue = 30 + lerpLevel * 60; // hue shift 30→90 (orange→yellow)
+const g = `radial-gradient(circle at 25% 25%, hsl(${hue},90%,${40+lerpLevel*20}%), hsl(${hue+30},90%,${20+lerpLevel*15}%) 55%, hsl(${hue+60},80%,10%) 100%)`;
+
+  if(g !== lastGradient){
+    bgEl.style.transition = `background ${Math.max(180, 520/speedFactor)}ms linear`;
+    bgEl.style.background = g;
+    lastGradient = g;
+  }
+}
+
+/* ---------------- Helpers ---------------- */
+function formatTime(s){
+  if(!s || isNaN(s) || !isFinite(s)) return '00:00';
+  const m = Math.floor(s/60), ss = Math.floor(s % 60);
+  return String(m).padStart(2,'0') + ':' + String(ss).padStart(2,'0');
+}
+
+/* ---------------- Initialization ---------------- */
+async function init(){
+  await loadTracks();
+}
+init();
+
+</script>
+</body>
+</html>
